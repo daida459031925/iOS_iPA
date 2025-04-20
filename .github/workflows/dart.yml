@@ -1,12 +1,17 @@
 name: iOS-ipa-build
 
 on:
-  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 jobs:
   build-ios:
     name: 🎉 iOS Build
     runs-on: macos-latest
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -14,29 +19,39 @@ jobs:
         with:
           channel: 'stable'
           architecture: x64
-      - run: flutter pub get
-      
 
-      - run: pod repo update
+      - run: flutter pub get
+
+      - name: 安装 CocoaPods 依赖
+        run: pod install
         working-directory: ios
 
-      - run: flutter build ios --release --no-codesign
+      - name: 导入签名文件
+        env:
+          P12_BASE64: ${{ secrets.P12_BASE64 }}
+          MOBILEPROVISION_BASE64: ${{ secrets.MOBILEPROVISION_BASE64 }}
+        run: |
+          echo $P12_BASE64 | base64 --decode > ios/cert.p12
+          echo $MOBILEPROVISION_BASE64 | base64 --decode > ios/embedded.mobileprovision
+          security create-keychain -p "" build.keychain
+          security import ios/cert.p12 -k build.keychain -P "${{ secrets.P12_PASSWORD }}" -T /usr/bin/codesign
+          security default-keychain -s build.keychain
 
-      - run: mkdir Payload
-        working-directory: build/ios/iphoneos
+      - run: flutter build ios --release
 
-      - run: mv Runner.app/ Payload
-        working-directory: build/ios/iphoneos
+      - name: 生成 IPA
+        run: |
+          xcodebuild -workspace Runner.xcworkspace -scheme Runner \
+            -configuration Release -archivePath Runner.xcarchive archive
+          xcodebuild -exportArchive -archivePath Runner.xcarchive \
+            -exportOptionsPlist exportOptions.plist -exportPath ./build/ios/ipa
+        working-directory: ios
 
-      - name: Zip output
-        run: zip -qq -r -9 FlutterIpaExport.ipa Payload
-        working-directory: build/ios/iphoneos
-
-      - name: Upload binaries to release
+      - name: 上传到 Release
         uses: svenstaro/upload-release-action@v2
         with:
           repo_token: ${{ secrets.GITHUB_TOKEN }}
-          file: build/ios/iphoneos/FlutterIpaExport.ipa
-          tag: v1.0
+          file: build/ios/ipa/FlutterIpaExport.ipa
+          tag: ${{ github.ref_name }}  # 动态获取标签
           overwrite: true
-          body: "This is first release"
+          body: "Production release"
